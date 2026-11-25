@@ -2,8 +2,8 @@
 
 An air harp for your phone. Stand the phone up so the front camera sees both hands, then:
 
-- **Make a string:** with one hand, pinch thumb and index, drag, let go. The string runs from where you pinched to where you let go.
-- **Play:** sweep your thumb or index fingertip through a string (both hands).
+- **Make a string:** with one hand, pinch thumb and index and hold still until the ring fills (half a second), then drag and let go. Quick accidental pinches are ignored. The string runs from where you pinched to where you let go.
+- **Play:** sweep your index fingertip through a string (either hand).
 - **Key / Scale / Sound:** tap to cycle. Notes are shown as Do Re Mi Fa Sol La Si. Sounds: guitar, piano, harp.
 - **Clear** removes all strings. The camera mode starts with none; draw your own. A string is cancelled if your hand leaves the view while drawing it.
 - No camera? "Play with touch only" and swipe on the screen.

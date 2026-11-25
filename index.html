@@ -44,8 +44,8 @@
 <div id="start">
   <h1>Hand Music</h1>
   <p>Stand your phone up so it sees both hands.<br>
-     <b>Make a string:</b> pinch thumb and index, drag, let go.<br>
-     <b>Play:</b> sweep your thumb or index fingertip through a string.</p>
+     <b>Make a string:</b> pinch thumb and index, hold until the ring fills, drag, let go.<br>
+     <b>Play:</b> sweep your index fingertip through a string.</p>
   <button id="camBtn">Start with camera</button>
   <button id="touchBtn">Play with touch only</button>
 </div>
@@ -64,7 +64,8 @@ const SCALES = {
 const INSTRUMENTS = { Guitar: 'acoustic_guitar_nylon', Piano: 'acoustic_grand_piano', Harp: 'orchestral_harp' };
 const SAMPLE_URL = 'https://gleitz.github.io/midi-js-soundfonts/FluidR3_GM';
 const FILE_NOTES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B']; // how the sample files are named
-const TIPS = [4, 8]; // MediaPipe landmark ids of the fingertips that play: thumb and index
+const TIPS = [8]; // MediaPipe landmark id of the fingertip that plays: index
+const HOLD_MS = 500; // a pinch must be held still this long before it starts drawing
 // pairs of landmarks to join when drawing the hand: thumb, 4 fingers, palm
 const BONES = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
   [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
@@ -201,7 +202,9 @@ let hands;
 let tips = [];          // playing fingertips on screen this frame, for drawing
 let skeletons = [];     // all 21 points of each hand, for drawing the hand
 let prevTips = {};      // "Left-8" -> last position, for detecting crossings
-const drafts = {};      // "Left"/"Right" -> string being drawn while that hand pinches
+// "Left"/"Right" -> pinch in progress: { a: start, b: current end, since: time, armed }.
+// Until armed (held still for HOLD_MS) it is only a candidate, so quick accidental pinches do nothing.
+const drafts = {};
 
 async function startCamera() {
   statusEl.textContent = 'Starting camera…';
@@ -222,7 +225,7 @@ async function startCamera() {
     runningMode: 'VIDEO', numHands: 2,
   });
   hands = await make('GPU').catch(() => make('CPU'));
-  statusEl.textContent = 'Pinch thumb and index, drag, let go to make a string';
+  statusEl.textContent = 'Pinch and hold, then drag and let go to make a string';
   setTimeout(() => statusEl.textContent = '', 6000);
 }
 
@@ -257,11 +260,17 @@ function track() {
       // pinch starts a string at the pinch point; dragging moves its other end
       const t = toScreen(lm[4]), f = toScreen(lm[8]);
       const p = { x: (t.x + f.x) / 2, y: (t.y + f.y) / 2 };
-      drafts[hand] = drafts[hand] ? { a: drafts[hand].a, b: p } : { a: p, b: p };
+      const d = drafts[hand];
+      if (!d || (!d.armed && Math.hypot(p.x - d.a.x, p.y - d.a.y) > 0.03)) {
+        drafts[hand] = { a: p, b: p, since: performance.now(), armed: false }; // (re)start the hold
+      } else {
+        d.b = d.armed ? p : d.a;
+        d.armed = d.armed || performance.now() - d.since > HOLD_MS;
+      }
       return; // a pinching hand is drawing, not playing
     }
-    if (drafts[hand]) { // pinch released: keep the string if it is long enough
-      addString(drafts[hand]);
+    if (drafts[hand]) { // pinch released: keep the string if it was armed and is long enough
+      if (drafts[hand].armed) addString(drafts[hand]);
       delete drafts[hand];
     }
     for (const id of TIPS) {
@@ -277,7 +286,7 @@ function track() {
 }
 
 function addString({ a, b }) {
-  if (Math.hypot(a.x - b.x, a.y - b.y) < 0.1) return; // too short: probably not meant
+  if (Math.hypot(a.x - b.x, a.y - b.y) < 0.15) return; // too short: probably not meant
   strings.push({ a, b, hitAt: -1e9 });
   if (strings.length > MAX_STRINGS) strings.shift();
   refresh();
@@ -314,7 +323,7 @@ function draw() {
   ctx.setLineDash([8, 8]);
   ctx.strokeStyle = 'rgba(255,255,255,.9)';
   ctx.lineWidth = 2;
-  for (const d of Object.values(drafts)) line(d.a, d.b, 0, now);
+  for (const d of Object.values(drafts)) if (d.armed) line(d.a, d.b, 0, now);
   ctx.setLineDash([]);
   ctx.strokeStyle = 'rgba(255,255,255,.6)';
   ctx.lineWidth = 2;
@@ -327,9 +336,17 @@ function draw() {
   for (const t of tips) {
     ctx.beginPath(); ctx.arc(t.x * W, t.y * H, 7, 0, Math.PI * 2); ctx.fill();
   }
-  ctx.fillStyle = 'rgba(255,255,255,.95)';
-  for (const { b: p } of Object.values(drafts)) {
-    ctx.beginPath(); ctx.arc(p.x * W, p.y * H, 10, 0, Math.PI * 2); ctx.fill();
+  for (const d of Object.values(drafts)) {
+    if (d.armed) { // drawing: solid dot at the moving end
+      ctx.fillStyle = 'rgba(255,255,255,.95)';
+      ctx.beginPath(); ctx.arc(d.b.x * W, d.b.y * H, 10, 0, Math.PI * 2); ctx.fill();
+    } else { // holding: a ring fills up until drawing starts
+      ctx.strokeStyle = 'rgba(255,255,255,.9)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(d.a.x * W, d.a.y * H, 16, -Math.PI / 2, -Math.PI / 2 + 2 * Math.PI * Math.min(1, (now - d.since) / HOLD_MS));
+      ctx.stroke();
+    }
   }
   requestAnimationFrame(draw);
 }
