@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000">
+<title>Hand Music</title>
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; background: #000; color: #fff; overflow: hidden;
+    font: 16px/1.3 system-ui, -apple-system, sans-serif; touch-action: none;
+    -webkit-user-select: none; user-select: none; }
+  video, canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+  video { object-fit: cover; transform: scaleX(-1); opacity: .55; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 8px;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    background: linear-gradient(transparent, rgba(0,0,0,.8)); }
+  #bar button { flex: 1; min-width: 0; padding: 10px 4px; border-radius: 14px;
+    border: 1px solid rgba(255,255,255,.25); background: rgba(20,20,24,.7); color: #fff;
+    font: inherit; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+  #bar small { display: block; font-size: 11px; opacity: .6; text-transform: uppercase; letter-spacing: .08em; }
+  #bar b { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #status { position: fixed; top: calc(10px + env(safe-area-inset-top)); left: 0; right: 0;
+    text-align: center; font-size: 13px; opacity: .7; pointer-events: none; }
+  #start { position: fixed; inset: 0; display: flex; flex-direction: column; gap: 14px;
+    align-items: center; justify-content: center; padding: 24px; text-align: center; background: #000; }
+  #start h1 { font-size: 32px; }
+  #start p { opacity: .7; max-width: 300px; }
+  #start button { width: 260px; padding: 16px; border-radius: 16px; border: 0; font: 600 17px system-ui; }
+  #camBtn { background: #ffcc4d; color: #000; }
+  #touchBtn { background: #222; color: #fff; }
+</style>
+</head>
+<body>
+<video id="video" playsinline muted autoplay></video>
+<canvas id="canvas"></canvas>
+<div id="status"></div>
+<div id="bar">
+  <button id="keyBtn"><small>Key</small><b></b></button>
+  <button id="scaleBtn"><small>Scale</small><b></b></button>
+  <button id="soundBtn"><small>Sound</small><b></b></button>
+</div>
+<div id="start">
+  <h1>Hand Music</h1>
+  <p>Prop your phone up, then swipe a fingertip up or down through the strings in the air.</p>
+  <button id="camBtn">Start with camera</button>
+  <button id="touchBtn">Play with touch only</button>
+</div>
+
+<script type="module">
+const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+const SCALES = {
+  'Pentatonic':  [0, 2, 4, 7, 9],
+  'Minor penta': [0, 3, 5, 7, 10],
+  'Major':       [0, 2, 4, 5, 7, 9, 11],
+  'Minor':       [0, 2, 3, 5, 7, 8, 10],
+  'Blues':       [0, 3, 5, 6, 7, 10],
+  'Hijaz':       [0, 1, 4, 5, 7, 8, 10],
+};
+const SOUNDS = ['Harp', 'Bell', 'Synth', 'Marimba'];
+const STRING_COUNT = 8;
+
+const state = { key: 9, scale: 'Minor penta', sound: 'Harp' }; // starts in A minor pentatonic
+const strings = []; // { y, midi, hitAt }
+
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const bar = document.getElementById('bar');
+let audio, W, H;
+
+// ---------- layout ----------
+function layout() {
+  const dpr = devicePixelRatio || 1;
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const top = 50, bottom = H - bar.offsetHeight - 10;
+  const steps = SCALES[state.scale];
+  strings.length = 0;
+  for (let i = 0; i < STRING_COUNT; i++) {
+    const octave = Math.floor(i / steps.length);
+    const midi = 48 + state.key + steps[i % steps.length] + 12 * octave; // root in octave 3
+    // lowest note at the bottom, like a harp you sweep upwards
+    const y = bottom - (i + 0.5) * (bottom - top) / STRING_COUNT;
+    strings.push({ y, midi, hitAt: -1e9 });
+  }
+  document.querySelector('#keyBtn b').textContent = NOTES[state.key];
+  document.querySelector('#scaleBtn b').textContent = state.scale;
+  document.querySelector('#soundBtn b').textContent = state.sound;
+}
+addEventListener('resize', layout);
+
+const cycle = (list, cur) => list[(list.indexOf(cur) + 1) % list.length];
+document.getElementById('keyBtn').onclick = () => { state.key = (state.key + 1) % 12; layout(); };
+document.getElementById('scaleBtn').onclick = () => { state.scale = cycle(Object.keys(SCALES), state.scale); layout(); };
+document.getElementById('soundBtn').onclick = () => { state.sound = cycle(SOUNDS, state.sound); pluck(strings[0]); };
+
+// ---------- sound (all synthesized) ----------
+function play(midi) {
+  const f = 440 * 2 ** ((midi - 69) / 12);
+  const t = audio.currentTime;
+  const out = audio.createGain();
+  out.connect(audio.destination);
+
+  if (state.sound === 'Harp') {
+    // Karplus-Strong plucked string: a burst of noise fed through a decaying delay line
+    const len = 1.6, n = Math.floor(audio.sampleRate * len);
+    const buf = audio.createBuffer(1, n, audio.sampleRate);
+    const d = buf.getChannelData(0);
+    const period = Math.round(audio.sampleRate / f);
+    for (let i = 0; i < n; i++) {
+      d[i] = i < period ? Math.random() * 2 - 1 : 0.996 * 0.5 * (d[i - period] + d[i - period + 1] || 0);
+    }
+    const src = audio.createBufferSource();
+    src.buffer = buf;
+    out.gain.value = 0.35;
+    src.connect(out);
+    src.start(t);
+    return;
+  }
+
+  // the other sounds: a couple of oscillators with an envelope
+  const voices = {
+    Bell:    { parts: [[1, 'sine', 1], [2.76, 'sine', 0.4], [5.4, 'sine', 0.15]], decay: 2.5 },
+    Synth:   { parts: [[1, 'sawtooth', 0.5], [1.005, 'square', 0.25]], decay: 0.8, filter: true },
+    Marimba: { parts: [[1, 'sine', 1], [4, 'sine', 0.25]], decay: 0.5 },
+  }[state.sound];
+
+  out.gain.setValueAtTime(0.0001, t);
+  out.gain.exponentialRampToValueAtTime(0.3, t + 0.005);
+  out.gain.exponentialRampToValueAtTime(0.0001, t + voices.decay);
+  let dest = out;
+  if (voices.filter) {
+    dest = audio.createBiquadFilter();
+    dest.frequency.setValueAtTime(f * 8, t);
+    dest.frequency.exponentialRampToValueAtTime(f * 1.5, t + voices.decay);
+    dest.connect(out);
+  }
+  for (const [ratio, type, gain] of voices.parts) {
+    const osc = audio.createOscillator(), g = audio.createGain();
+    osc.type = type; osc.frequency.value = f * ratio; g.gain.value = gain;
+    osc.connect(g).connect(dest);
+    osc.start(t); osc.stop(t + voices.decay);
+  }
+}
+
+function pluck(s) {
+  if (performance.now() - s.hitAt < 80) return; // debounce jitter
+  s.hitAt = performance.now();
+  play(s.midi);
+}
+
+// a point moved from y0 to y1: pluck every string it crossed
+function sweep(y0, y1) {
+  if (Math.abs(y1 - y0) > H * 0.4) return; // tracking jump, not a real movement
+  for (const s of strings) {
+    if ((y0 < s.y && y1 >= s.y) || (y0 > s.y && y1 <= s.y)) pluck(s);
+  }
+}
+
+// ---------- touch ----------
+const touches = {};
+canvas.addEventListener('pointerdown', e => {
+  touches[e.pointerId] = e.clientY;
+  const near = strings.find(s => Math.abs(s.y - e.clientY) < 18);
+  if (near) pluck(near);
+});
+canvas.addEventListener('pointermove', e => {
+  if (!(e.pointerId in touches)) return;
+  sweep(touches[e.pointerId], e.clientY);
+  touches[e.pointerId] = e.clientY;
+});
+const endTouch = e => delete touches[e.pointerId];
+canvas.addEventListener('pointerup', endTouch);
+canvas.addEventListener('pointercancel', endTouch);
+
+// ---------- hand tracking ----------
+let hands, tips = []; // tips: [{x, y}] fingertips on screen, for drawing and crossing
+const prevTips = {};
+
+async function startCamera() {
+  statusEl.textContent = 'Starting camera…';
+  video.srcObject = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false,
+  });
+  await video.play();
+  statusEl.textContent = 'Loading hand tracking…';
+  const base = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+  const { FilesetResolver, HandLandmarker } = await import(`${base}/vision_bundle.mjs`);
+  const files = await FilesetResolver.forVisionTasks(`${base}/wasm`);
+  const make = delegate => HandLandmarker.createFromOptions(files, {
+    baseOptions: {
+      modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+      delegate,
+    },
+    runningMode: 'VIDEO', numHands: 2,
+  });
+  hands = await make('GPU').catch(() => make('CPU'));
+  statusEl.textContent = 'Swipe a fingertip through the strings';
+  setTimeout(() => statusEl.textContent = '', 4000);
+}
+
+// video pixels -> screen pixels, matching object-fit: cover and the mirror flip
+function toScreen(p) {
+  const scale = Math.max(W / video.videoWidth, H / video.videoHeight);
+  const dw = video.videoWidth * scale, dh = video.videoHeight * scale;
+  return { x: W - ((W - dw) / 2 + p.x * dw), y: (H - dh) / 2 + p.y * dh };
+}
+
+let lastVideoTime = -1;
+function track() {
+  if (!hands || video.currentTime === lastVideoTime) return;
+  lastVideoTime = video.currentTime;
+  const res = hands.detectForVideo(video, performance.now());
+  tips = [];
+  const seen = new Set();
+  res.landmarks.forEach((lm, i) => {
+    const id = res.handedness[i]?.[0]?.categoryName || i; // keep left/right hands apart
+    const tip = toScreen(lm[8]); // index fingertip
+    if (prevTips[id]) sweep(prevTips[id].y, tip.y);
+    prevTips[id] = tip;
+    seen.add(String(id));
+    tips.push(tip);
+  });
+  for (const id in prevTips) if (!seen.has(id)) delete prevTips[id]; // hand left the frame
+}
+
+// ---------- drawing ----------
+function draw() {
+  track();
+  ctx.clearRect(0, 0, W, H);
+  const now = performance.now();
+  ctx.font = '600 12px system-ui';
+  for (const s of strings) {
+    const age = (now - s.hitAt) / 1000;
+    const glow = Math.max(0, 1 - age / 0.8);
+    const wobble = glow * 6;
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 8) {
+      const y = s.y + Math.sin(x / W * Math.PI) * Math.sin(now / 25) * wobble;
+      x ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.strokeStyle = `hsla(${45 - glow * 15}, 100%, ${70 + glow * 20}%, ${0.45 + glow * 0.55})`;
+    ctx.lineWidth = 2 + glow * 3;
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.6)';
+    ctx.fillText(NOTES[s.midi % 12], 10, s.y - 6);
+  }
+  for (const t of tips) {
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, 12, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,204,77,.9)';
+    ctx.fill();
+  }
+  requestAnimationFrame(draw);
+}
+
+// ---------- start ----------
+function begin(withCamera) {
+  audio = new (window.AudioContext || window.webkitAudioContext)(); // must be created on a tap for iOS
+  document.getElementById('start').remove();
+  layout();
+  draw();
+  if (withCamera) startCamera().catch(err => {
+    statusEl.textContent = 'Camera unavailable, use touch: ' + err.message;
+  });
+}
+document.getElementById('camBtn').onclick = () => begin(true);
+document.getElementById('touchBtn').onclick = () => begin(false);
+</script>
+</body>
+</html>
