@@ -206,6 +206,15 @@ let prevTips = {};      // "Left-8" -> last position, for detecting crossings
 // Until armed (held still for HOLD_MS) it is only a candidate, so quick accidental pinches do nothing.
 const drafts = {};
 
+// The phone sits propped up with no touches, so stop the screen from going to sleep.
+// The lock is dropped when the tab is hidden, so take it again on return.
+function keepAwake() {
+  navigator.wakeLock?.request('screen').catch(() => {});
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && hands) keepAwake();
+});
+
 async function startCamera() {
   statusEl.textContent = 'Starting camera…';
   video.srcObject = await navigator.mediaDevices.getUserMedia({
@@ -213,6 +222,7 @@ async function startCamera() {
   });
   await video.play();
   audio.resume(); // starting the camera can suspend audio on iOS
+  keepAwake();
   statusEl.textContent = 'Loading hand tracking…';
   const base = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
   const { FilesetResolver, HandLandmarker } = await import(`${base}/vision_bundle.mjs`);
