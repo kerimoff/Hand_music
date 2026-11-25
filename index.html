@@ -64,12 +64,15 @@ const SCALES = {
   'Hijaz':       [0, 1, 4, 5, 7, 8, 10],
 };
 // Recorded instruments from the FluidR3 General MIDI soundfont (CC BY 3.0), one mp3 per note
-const INSTRUMENTS = { Guitar: 'acoustic_guitar_nylon', Piano: 'acoustic_grand_piano', Harp: 'orchestral_harp' };
+const INSTRUMENTS = { Guitar: 'acoustic_guitar_nylon', Piano: 'acoustic_grand_piano', Harp: 'orchestral_harp',
+  Kalimba: 'kalimba', Sitar: 'sitar' };
 // simple line icons for the sound button
 const ICONS = {
   Guitar: '<circle cx="8" cy="16" r="5"/><circle cx="8" cy="16" r="1.3"/><path d="M11.5 12.5L19 5M17.5 3.5l3 3"/>',
   Piano: '<rect x="3" y="5" width="18" height="14" rx="1.5"/><path d="M7.5 5v14M12 5v14M16.5 5v14"/><path d="M7.5 5v8M12 5v8M16.5 5v8" stroke-width="3.5"/>',
   Harp: '<path d="M6 3v18h13C18 11 13 5 6 3z"/><path d="M9.5 5.5V21M13 8V21M16 12.5V21"/>',
+  Kalimba: '<path d="M5 4h14l1 16H4z"/><path d="M8 4v8M10.7 4v10M13.3 4v10M16 4v8"/><circle cx="12" cy="17" r="1.3"/>',
+  Sitar: '<circle cx="7" cy="17" r="4.5"/><circle cx="18.5" cy="5.5" r="1.8"/><path d="M10.2 13.8L17.2 6.8M12.5 13l-1.5-1.5M14.5 11l-1.5-1.5"/>',
 };
 const SAMPLE_URL = 'https://gleitz.github.io/midi-js-soundfonts/FluidR3_GM';
 const FILE_NOTES = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B']; // how the sample files are named
@@ -104,7 +107,18 @@ function midiFor(i) {
   return 48 + state.key + steps[i % steps.length] + 12 * Math.floor(i / steps.length);
 }
 
+// strings and settings survive a reload or a locked phone
+function save() {
+  // touch-only mode has its own ready-made strings, so it keeps the saved camera strings as they were
+  const kept = cameraMode ? strings.map(({ a, b }) => ({ a, b })) : load()?.strings;
+  try { localStorage.handMusic = JSON.stringify({ state, strings: kept }); } catch {}
+}
+function load() {
+  try { return JSON.parse(localStorage.handMusic); } catch { return null; }
+}
+
 function refresh() {
+  save();
   document.querySelector('#keyBtn b').textContent = NOTES[state.key];
   document.querySelector('#scaleBtn b').textContent = state.scale;
   document.querySelector('#instBtn b').innerHTML = `<svg viewBox="0 0 24 24">${ICONS[state.inst]}</svg>`;
@@ -124,7 +138,7 @@ const cycle = (list, cur) => list[(list.indexOf(cur) + 1) % list.length];
 document.getElementById('keyBtn').onclick = () => { state.key = (state.key + 1) % 12; refresh(); };
 document.getElementById('scaleBtn').onclick = () => { state.scale = cycle(Object.keys(SCALES), state.scale); refresh(); };
 document.getElementById('instBtn').onclick = () => { state.inst = cycle(Object.keys(INSTRUMENTS), state.inst); refresh(); };
-document.getElementById('clearBtn').onclick = () => { strings = []; for (const h in drafts) delete drafts[h]; };
+document.getElementById('clearBtn').onclick = () => { strings = []; for (const h in drafts) delete drafts[h]; save(); };
 
 // ---------- sound ----------
 const samples = {}; // "instrument/midi" -> AudioBuffer, or a Promise while loading
@@ -285,16 +299,20 @@ function track() {
       const t = toScreen(lm[4]), f = toScreen(lm[8]);
       const p = { x: (t.x + f.x) / 2, y: (t.y + f.y) / 2 };
       const d = drafts[hand];
-      if (!d || (!d.armed && Math.hypot(p.x - d.a.x, p.y - d.a.y) > 0.03)) {
-        drafts[hand] = { a: p, b: p, since: performance.now(), armed: false }; // (re)start the hold
-      } else {
-        d.b = d.armed ? p : d.a;
-        d.armed = d.armed || performance.now() - d.since > HOLD_MS;
+      if (!d || (!d.armed && !d.done && Math.hypot(p.x - d.a.x, p.y - d.a.y) > 0.05)) {
+        // (re)start the hold. Holding on a string deletes it instead of drawing.
+        drafts[hand] = { a: p, b: p, since: performance.now(), armed: false, target: nearestString(p) };
+      } else if (!d.done) {
+        d.b = p; // the ring and the line follow the fingers
+        if (!d.armed && performance.now() - d.since > HOLD_MS) {
+          if (d.target) { strings = strings.filter(s => s !== d.target); refresh(); d.done = true; }
+          else { d.armed = true; d.a = p; } // the string starts where the fingers are now
+        }
       }
       return; // a pinching hand is drawing, not playing
     }
     if (drafts[hand]) { // pinch released: keep the string if it was armed and is long enough
-      if (drafts[hand].armed) addString(drafts[hand]);
+      if (drafts[hand].armed) addString(drafts[hand]);  // (a finished delete just ends here)
       delete drafts[hand];
     }
     for (const id of TIPS) {
@@ -311,10 +329,25 @@ function track() {
 
 function addString({ a, b }) {
   if (Math.hypot(a.x - b.x, a.y - b.y) < 0.15) return; // too short: probably not meant
-  strings.push({ a, b, hitAt: -1e9 });
-  if (strings.length > MAX_STRINGS) strings.shift();
+  if (strings.length >= MAX_STRINGS) { statusEl.textContent = `${MAX_STRINGS} strings is the limit`; return; }
+  const s = { a, b, hitAt: -1e9 };
+  strings.push(s);
+  // notes go by height, like a harp: the lowest string on screen plays the lowest note
+  strings.sort((p, q) => (q.a.y + q.b.y) - (p.a.y + p.b.y));
   refresh();
-  pluck(strings.length - 1);
+  pluck(strings.indexOf(s), 0.7);
+}
+
+// the string within reach of point p (fractions of the screen), if any
+function nearestString(p) {
+  const dist = s => {
+    const dx = s.b.x - s.a.x, dy = s.b.y - s.a.y;
+    const t = Math.max(0, Math.min(1, ((p.x - s.a.x) * dx + (p.y - s.a.y) * dy) / (dx * dx + dy * dy)));
+    return Math.hypot(s.a.x + t * dx - p.x, s.a.y + t * dy - p.y);
+  };
+  let best = null;
+  for (const s of strings) if (dist(s) < 0.04 && (!best || dist(s) < dist(best))) best = s;
+  return best;
 }
 
 // ---------- drawing ----------
@@ -361,15 +394,19 @@ function draw() {
     ctx.beginPath(); ctx.arc(t.x * W, t.y * H, 7, 0, Math.PI * 2); ctx.fill();
   }
   for (const d of Object.values(drafts)) {
+    if (d.done) continue;
+    const x = d.b.x * W, y = d.b.y * H;
     if (d.armed) { // drawing: solid dot at the moving end
       ctx.fillStyle = 'rgba(255,255,255,.95)';
-      ctx.beginPath(); ctx.arc(d.b.x * W, d.b.y * H, 10, 0, Math.PI * 2); ctx.fill();
-    } else { // holding: a ring fills up until drawing starts
-      ctx.strokeStyle = 'rgba(255,255,255,.9)';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.arc(d.a.x * W, d.a.y * H, 16, -Math.PI / 2, -Math.PI / 2 + 2 * Math.PI * Math.min(1, (now - d.since) / HOLD_MS));
-      ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, 10, 0, Math.PI * 2); ctx.fill();
+    } else { // holding: a ring around the fingers fills up; red when it will delete a string
+      const red = !!d.target, k = Math.min(1, (now - d.since) / HOLD_MS);
+      if (red) { ctx.strokeStyle = 'rgba(255,80,80,.9)'; ctx.lineWidth = 6; line(d.target.a, d.target.b, 0, now); }
+      ctx.strokeStyle = 'rgba(255,255,255,.25)';
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(x, y, 18, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = red ? 'rgb(255,80,80)' : '#fff';
+      ctx.beginPath(); ctx.arc(x, y, 18, -Math.PI / 2, -Math.PI / 2 + 2 * Math.PI * k); ctx.stroke();
     }
   }
   if (cameraMode && !strings.length && !Object.keys(drafts).length) drawTutorial(now);
@@ -459,7 +496,10 @@ function begin(withCamera) {
   audio = new (window.AudioContext || window.webkitAudioContext)(); // must be created on a tap for iOS
   unlockAudio();
   document.getElementById('start').remove();
-  strings = withCamera ? [] : defaultStrings(); // camera: draw your own strings
+  const saved = load();
+  if (saved?.state && INSTRUMENTS[saved.state.inst] && SCALES[saved.state.scale]) Object.assign(state, saved.state);
+  // camera: your own strings from last time (none at first); touch only: a ready-made set
+  strings = withCamera ? (saved?.strings || []).map(s => ({ ...s, hitAt: -1e9 })) : defaultStrings();
   cameraMode = withCamera;
   resize();
   refresh();
