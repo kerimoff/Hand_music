@@ -186,6 +186,7 @@ async function startCamera() {
     video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false,
   });
   await video.play();
+  audio.resume(); // starting the camera can suspend audio on iOS
   statusEl.textContent = 'Loading hand tracking…';
   const base = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
   const { FilesetResolver, HandLandmarker } = await import(`${base}/vision_bundle.mjs`);
@@ -258,8 +259,27 @@ function draw() {
 }
 
 // ---------- start ----------
+// iPhones mute Web Audio when the silent switch is on. Asking for "playback" audio
+// (newer iOS) and playing a silent audio element (older iOS) makes it play anyway.
+function unlockAudio() {
+  if (navigator.audioSession) navigator.audioSession.type = 'playback';
+  const wav = new Uint8Array(844).fill(128); // 0.1 s of 8-bit silence at 8 kHz, as a WAV file
+  const v = new DataView(wav.buffer);
+  [[0, 'RIFF'], [8, 'WAVEfmt '], [36, 'data']].forEach(([at, txt]) => [...txt].forEach((c, i) => wav[at + i] = c.charCodeAt(0)));
+  [[4, 836, 4], [16, 16, 4], [20, 1, 2], [22, 1, 2], [24, 8000, 4], [28, 8000, 4], [32, 1, 2], [34, 8, 2], [40, 800, 4]]
+    .forEach(([at, n, size]) => size === 4 ? v.setUint32(at, n, true) : v.setUint16(at, n, true));
+  const silence = new Audio(URL.createObjectURL(new Blob([wav], { type: 'audio/wav' })));
+  silence.setAttribute('playsinline', '');
+  silence.loop = true;
+  silence.play().catch(() => {});
+  audio.resume();
+  // iOS can suspend audio again (camera start, phone call, app switch): resume on every touch
+  addEventListener('pointerdown', () => audio.state !== 'running' && audio.resume());
+}
+
 function begin(withCamera) {
   audio = new (window.AudioContext || window.webkitAudioContext)(); // must be created on a tap for iOS
+  unlockAudio();
   document.getElementById('start').remove();
   layout();
   draw();
